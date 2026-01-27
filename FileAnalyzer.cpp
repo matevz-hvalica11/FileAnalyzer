@@ -1,4 +1,4 @@
-﻿// FileAnalyzer.cpp : This file contains the 'main' function. Program execution begins and ends there.
+// FileAnalyzer.cpp : This file contains the 'main' function. Program execution begins and ends there.
 //
 
 #include <iostream>
@@ -17,260 +17,167 @@
 
 namespace fs = std::filesystem;
 
-void processFile(
-    const fs::directory_entry& entry,
-    std::size_t& count,
-    std::uintmax_t& totalSize,
-    std::vector<std::pair<std::uintmax_t, fs::path>>& allFiles,
-    std::unordered_map<std::string, std::size_t>& fileTypes,
-    std::mutex& dataMutex)
+
+// Simple ANSI Colors (work everywhere)
+#define GREEN "\033[32m"
+#define YELLOW "\033[33m"
+#define RED "\033[31m"
+#define CYAN "\033[36m"
+#define RESET "\033[0m"
+
+
+// Global Shared State
+std::size_t g_count = 0;
+std::uintmax_t g_totalSize = 0;
+
+std::unordered_map<std::string, std::uintmax_t> g_extTotalSize;
+std::mutex g_dataMutex;
+
+std::queue<fs::directory_entry> g_workQueue;
+std::mutex g_queueMatex;
+std::condition_variable g_cv;
+
+bool g_doneScanning = false;
+
+
+// Worker Thread Function
+void worker()
 {
-    if (!entry.is_regular_file())
-        return;
+	while (true)
+	{
+		fs::directory_entry entry;
 
-    auto size = entry.file_size();
-    std::string ext = entry.path().extension().string();
+		{
+			// Wait for work
+			std::unique_lock<std::mutex> lock(g_queueMatex);
+			g_cv.wait(lock, []()
+			{
+				return !g_workQueue.empty() || g_doneScanning;
+			});
 
-    if (ext.empty())
-        ext = "(no ext)";
-    else
-        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+			if (g_workQueue.empty() && g_doneScanning)
+				return;
 
+			entry = g_workQueue.front();
+			g_workQueue.pop();
+		}
 
-    // Lock before touching shared data
-    std::lock_guard<std::mutex> lock(dataMutex);
+		// Process file
+		if (!entry.is_regular_file())
+			continue;
 
-    ++count;
-    totalSize += size;
-    allFiles.emplace_back(size, entry.path());
-    ++fileTypes[ext];
+		auto size = entry.file_size();
+		std::string ext = entry.path().extension().string();
+
+		if (ext.empty())
+			ext = "(no ext)";
+		else
+			std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+
+		std::lock_guard<std::mutex> lock(g_dataMutex);
+
+		g_count++;
+		g_totalSize += size;
+		g_extTotalSize[ext] += size;
+	}
 }
 
 
-// Worker function
-void workerThread(
-    std::queue<fs::directory_entry>& workQueue,
-    std::mutex& queueMutex,
-    std::condition_variable& cv,
-    bool& doneScanning,
-    std::size_t& count,
-    std::uintmax_t& totalSize,
-    std::vector<std::pair<std::uintmax_t, fs::path>>& allFiles,
-    std::unordered_map<std::string, std::size_t>& fileTypes,
-    std::mutex& dataMutex)
-{
-    while (true)
-    {
-        fs::directory_entry entry;
-
-        {
-            std::unique_lock<std::mutex> lock(queueMutex);
-            cv.wait(lock, [&]()
-                {
-                    return !workQueue.empty() || doneScanning;
-                });
-
-            if (workQueue.empty() && doneScanning)
-                return;
-
-            entry = workQueue.front();
-            workQueue.pop();
-        }
-
-        if (!entry.is_regular_file())
-            continue;
-
-        auto size = entry.file_size();
-        std::string ext = entry.path().extension().string();
-
-        if (ext.empty())
-            ext = "(no ext)";
-        else
-            std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-
-        {
-            std::lock_guard<std::mutex> lock(dataMutex);
-            ++count;
-            totalSize += size;
-            allFiles.emplace_back(size, entry.path());
-            ++fileTypes[ext];
-        }
-    }
-}
+// Main
 
 int main(int argc, char* argv[])
 {
+	std::cout << CYAN "FileAnalyzer starting...\n" << RESET;
 
-    // Variable declarations
-    std::size_t count = 0;
-    std::uintmax_t totalSize = 0;
-    std::vector<std::pair<std::uintmax_t, fs::path>> allFiles;
-    std::unordered_map<std::string, std::size_t> fileTypes;
-    std::mutex dataMutex;
-    std::vector<std::thread> workers;
-    std::queue<fs::directory_entry> workQueue;
-    std::mutex queueMutex;
-    std::condition_variable cv;
+	if (argc < 2)
+	{
+		std::cout << RED << "Usage: FileAnalyzer <directory_path>\n" << RESET;
+		return 1;
+	}
 
-    bool doneScanning = false;
+	fs::path rootPath = argv[1];
+	std::cout << "Scanning path: " << rootPath.string() << "\n";
 
-    const unsigned int maxThreads = std::thread::hardware_concurrency();
+	if (!fs::exists(rootPath) || !fs::is_directory(rootPath))
+	{
+		std::cout << RED << "Invalid path.\n" << RESET;
+		return 1;
+	}
 
-    std::cout << "FileAnalyzer starting...\n";
+	// Launch worker threads
+	unsigned int threadCount = std::max(2u, std::thread::hardware_concurrency());
+	std::vector<std::thread> threads;
 
-    if (argc < 2)
-    {
-        std::cout << "Usage: FileAnalyzer <directory_path>\n";
-        return 1;
-    }
+	for (unsigned int i = 0; i < threadCount; i++)
+		threads.emplace_back(worker);
 
-    fs::path rootPath = argv[1];
-    std::cout << "Scanning path: [" << rootPath.string() << "]\n";
+	// Feed Queue
+	try
+	{
+		for (const auto& entry : fs::recursive_directory_iterator(
+			rootPath,
+			fs::directory_options::skip_permission_denied |
+			fs::directory_options::follow_directory_symlink))
+		{
+			{
+				std::lock_guard<std::mutex> lock(g_queueMatex);
+				g_workQueue.push(entry);
+			}
+			g_cv.notify_one();
+		}
+	}
+	catch (const fs::filesystem_error& e)
+	{
+		std::cerr << RED << "Filesystem error: " << e.what() << RESET << '\n';
+	}
 
+	// Signal shutdown
+	{
+		std::lock_guard<std::mutex> lock(g_queueMatex);
+		g_doneScanning = true;
+	}
+	g_cv.notify_all();
 
-    // Start worker threads
-    const unsigned int threadCount = std::thread::hardware_concurrency();
+	// Wait for workers
+	for (auto& t : threads)
+		t.join();
 
-    for (unsigned int i = 0; i < threadCount; ++i)
-    {
-        workers.emplace_back(
-            workerThread,
-            std::ref(workQueue),
-            std::ref(queueMutex),
-            std::ref(cv),
-            std::ref(doneScanning),
-            std::ref(count),
-            std::ref(totalSize),
-            std::ref(allFiles),
-            std::ref(fileTypes),
-            std::ref(dataMutex));
-    }
+	// Reporting + sorting
+	double totalGB = g_totalSize / (1024.0 * 1024 * 1024);
 
-    if (!fs::exists(rootPath))
-    {
-        std::cout << "Path does not exist\n";
-        return 1;
-    }
-
-    if (!fs::is_directory(rootPath))
-    {
-        std::cout << "Path is not a directory\n";
-        return 1;
-    }
-
-    try
-    {
-        // Scan loop
-        for (const auto& entry : fs::recursive_directory_iterator(
-            rootPath,
-            fs::directory_options::skip_permission_denied |
-            fs::directory_options::follow_directory_symlink))
-        {
-            {
-                std::lock_guard<std::mutex> lock(queueMutex);
-                workQueue.push(entry);
-            }
-            cv.notify_one();
-        }
-
-        // Shutdown workers cleanly
-        {
-            std::lock_guard<std::mutex> lock(queueMutex);
-            doneScanning = true;
-        }
-        cv.notify_all();
-
-        for (auto& t : workers)
-            t.join();
-
-        // Sort everything
-        std::sort(allFiles.begin(), allFiles.end(),
-            [](const auto& a, const auto& b)
-            {
-                return a.first > b.first;
-            });
-
-        std::ofstream report("report.txt");
-        if (!report)
-        {
-            std::cerr << "Failed to create report.txt\n";
-            return 1;
-        }
-
-        auto now = std::chrono::system_clock::now();
-        std::time_t nowTime = std::chrono::system_clock::to_time_t(now);
-
-        char timeBuffer[26];
-        ctime_s(timeBuffer, sizeof(timeBuffer), &nowTime);
-
-        report << "FileAnalyzer Report\n";
-        report << "Scanned path: " << rootPath.string() << '\n';
-        report << "Generated at: " << timeBuffer;
-        report << "----------------------------------------\n\n";
+	// Sort extensions by total size
+	std::vector<std::pair<std::string, std::uintmax_t>> sortedExts(
+		g_extTotalSize.begin(), g_extTotalSize.end()
+	);
+	
+	std::sort(sortedExts.begin(), sortedExts.end(),
+		[](auto& a, auto& b)
+		{
+			return a.second > b.second;
+		});
 
 
-        // Convert size after loop
-        double totalSizeGB = totalSize / (1024.0 * 1024 * 1024);
+	// Output Results
+	std::cout << GREEN << "\nScan finished.\n" << RESET;
+	std::cout << "Total files: " << g_count << "\n";
+	std::cout << "Total size: " << std::fixed << std::setprecision(2)
+		<< totalGB << " GB\n\n";
 
+	std::cout << YELLOW << "Top 15 file extensions by TOTAL SIZE:\n" << RESET;
 
-        // Report file
-        report << "\nTop 50 largest files:\n";
-        for (std::size_t i = 0; i < 50 && i < allFiles.size(); ++i)
-        {
-            double sizeGB = allFiles[i].first / (1024.0 * 1024 * 1024);
-            report << std::fixed << std::setprecision(2)
-                << sizeGB << " GB - "
-                << allFiles[i].second.string() << '\n';
-        }
+	for (size_t i = 0; i < 15 && i < sortedExts.size(); i++)
+	{
+		double gb = sortedExts[i].second / (1024.0 * 1024 * 1024);
+		double pct = (sortedExts[i].second / (double)g_totalSize) * 100.0;
 
-        std::vector<std::pair<std::string, std::size_t>> sortedTypes(
-            fileTypes.begin(), fileTypes.end());
+		std::cout << CYAN
+			<< std::setw(8) << sortedExts[i].first << RESET
+			<< " : "
+			<< std::setw(8) << std::fixed << std::setprecision(2) << gb
+			<< " GB  (" << std::setprecision(1) << pct << "%\n";
+	}
 
-        std::sort(sortedTypes.begin(), sortedTypes.end(),
-            [](const auto& a, const auto& b)
-            {
-                return a.second > b.second;
-            });
-
-        report << "\nTop 10 file types:\n";
-        for (std::size_t i = 0; i < 10 && i < sortedTypes.size(); ++i)
-        {
-            report << sortedTypes[i].first
-                << " : "
-                << sortedTypes[i].second
-                << '\n';
-        }
-
-        report.close();
-
-
-        // Console output
-        std::cout << "Total size (GB): "
-            << std::fixed << std::setprecision(2)
-            << totalSizeGB << '\n';
-
-        std::cout << "\nTop 50 largest files:\n";
-        for (std::size_t i = 0; i < 50 && i < allFiles.size(); ++i)
-        {
-            double sizeGB = allFiles[i].first / (1024.0 * 1024 * 1024);
-            std::cout << sizeGB << " GB - " << allFiles[i].second.string() << '\n';
-        }
-
-        std::cout << "\nTop 10 file types:\n";
-        for (std::size_t i = 0; i < 10 && i < sortedTypes.size(); ++i)
-        {
-            std::cout << sortedTypes[i].first
-                << " : "
-                << sortedTypes[i].second
-                << '\n';
-        }
-    }
-    catch (const fs::filesystem_error& e)
-    {
-        std::cerr << "Filesystem error: " << e.what() << '\n';
-    }
-
-    return 0;
+	return 0;
 }
 
 // Run program: Ctrl + F5 or Debug > Start Without Debugging menu
