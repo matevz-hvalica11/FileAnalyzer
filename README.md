@@ -1,32 +1,52 @@
 # FileAnalyzer (C++)
 
-High-performance multithreaded file system analyzer written in modern C++.
-
+A high-performance, multithreaded file-system analyzer written in modern C++17.
+Built to handle massive directories efficiently while providing clean, structured output.
 
 ## Features
-  - Recursive directory scanning using `std::filesystem`
-  - Multithreaded processing with worker threads
-  - Thread-safe aggregation (mutex + condition_variable)
-  - Reports:
-    - Total size
-    - Largest files
-    - Most common file types
-  - Generates a detailed report file
+🔍 Recursive directory scanning via std::filesystem
+⚡ Multithreaded processing using a worker-thread queue
+🔐 Thread-safe aggregation with mutexes + condition variables
+
+📊 Reports include:
+
+  - Total file count
+
+  - Total size (in GB)
+
+  - Largest files
+
+  - File extensions ranked by total size
+
+  - Percentage breakdowns
+
+
+📝 Automatically generates a detailed report file
 
 
 ## Example Output
 
-Total size (GB): 8.84
+FileAnalyzer starting...
+Scanning path: C:\Windows\System32
+
+Total files: 42762  
+Total size: 8.84 GB  
+
 Top 50 largest files:
 0.28 GB - C:\Windows\System32\Microsoft-Edge-WebView\msedge.dll
+...
 
 
-## Build
-Requires a C++17-compatible compiler.
+## Build instructions
+Requires C++17 or newer.
 
 Example (MSVC):
 
 cl /std:c++17 FileAnalyzer.cpp
+
+
+## Linux / clang / g++ Example
+g++ -std=c++17 -O2 FileAnalyzer.cpp -o FileAnalyzer -lpthread
 
 
 ## Usage
@@ -39,4 +59,4 @@ FileAnalyzer C:\Windows\System32
 
 
 ## Notes
-This project is designed to handle large real-world directories and demonstrate practical multithreading and synchronization in C++.
+This project was built to handle large real-world directory trees, stress-test multithreading, and serve as a practical example of synchronization, queue-based workload distribution, and modern C++ filesystem APIs.
