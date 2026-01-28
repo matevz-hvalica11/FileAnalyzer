@@ -5,7 +5,9 @@ Built to handle massive directories efficiently while providing clean, structure
 
 ## Features
 🔍 Recursive directory scanning via std::filesystem
+
 ⚡ Multithreaded processing using a worker-thread queue
+
 🔐 Thread-safe aggregation with mutexes + condition variables
 
 📊 Reports include:
