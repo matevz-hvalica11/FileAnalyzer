@@ -1,5 +1,8 @@
 # FileAnalyzer (C++)
 
+
+<img width="1483" height="762" alt="Posnetek zaslona 2026-01-29 070840" src="https://github.com/user-attachments/assets/45e21f2f-9633-40e7-a3ec-dfb3a272e4f3" />
+
 A high-performance, multithreaded file-system analyzer written in modern C++17.
 Built to handle massive directories efficiently while providing clean, structured output.
 
